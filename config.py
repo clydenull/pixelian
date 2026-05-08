@@ -145,7 +145,7 @@ DEVICE_PRESETS: dict[str, dict[str, str]] = {
     },
 }
 
-DEFAULT_DEVICE_PROFILE = "pixel_10_pro"
+DEFAULT_DEVICE_PROFILE = "pixel_5_android_11"
 DEVICE_PROFILE_NAME = (
     _env_text("DEVICE_PROFILE", DEFAULT_DEVICE_PROFILE).lower().replace("-", "_")
 )
