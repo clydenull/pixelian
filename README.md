@@ -8,7 +8,7 @@ AutoPixel is a Telegram bot that simulates a Pixel 10 Pro session, signs in to a
 ## Highlights
 
 - Simulates a fresh Pixel 10 Pro device profile for each login session
-- Optional legacy **Pixel 5 (Android 11)** profile for older device fingerprints (`DEVICE_PROFILE=pixel_5_android_11`)
+- Switchable device profiles for Pixel 4a, Pixel 5, Pixel 6, Pixel 7 Pro, Pixel 8 Pro, and Pixel 10 Pro via `DEVICE_PROFILE`
 - Supports Gmail and Google Workspace accounts
 - Handles Google sign-in with TOTP / authenticator flow support
 - Can attempt audio captcha solving through `wit.ai` before falling back to manual verification
@@ -208,7 +208,7 @@ Notes:
 
 ### Optional device profile
 
-By default, AutoPixel simulates a **Pixel 10 Pro on Android 16**. To switch to the legacy **Pixel 5 (Android 11)** profile, set in `.env`:
+By default, AutoPixel simulates a **Pixel 10 Pro on Android 16**. To switch to another device, set the preset in `.env`:
 
 ```env
 DEVICE_PROFILE=pixel_5_android_11
@@ -216,12 +216,16 @@ DEVICE_PROFILE=pixel_5_android_11
 
 Available presets:
 
-| Preset | Device | Android | SDK | Use case |
-|---|---|---|---|---|
-| `pixel_10_pro` (default) | Pixel 10 Pro | 16 | 36 | Modern fingerprint, recommended for new flows |
-| `pixel_5_android_11` | Pixel 5 | 11 | 30 | Legacy fingerprint when an older device is needed |
+| Preset | Device | Android | SDK | GPU | RAM |
+|---|---|---|---|---|---|
+| `pixel_10_pro` (default) | Pixel 10 Pro | 16 | 36 | Adreno 750 | 12 GB |
+| `pixel_8_pro` | Pixel 8 Pro | 14 | 34 | Mali-G715 Immortalis MP7 | 12 GB |
+| `pixel_7_pro` | Pixel 7 Pro | 14 | 34 | Mali-G710 MP7 | 12 GB |
+| `pixel_6` | Pixel 6 | 14 | 34 | Mali-G78 MP20 | 8 GB |
+| `pixel_5_android_11` | Pixel 5 | 11 | 30 | Adreno 620 | 8 GB |
+| `pixel_4a` | Pixel 4a | 13 | 33 | Adreno 618 | 6 GB |
 
-Switching the profile changes the simulated user-agent, build IDs, screen metrics, WebGL renderer, RAM, and Client Hints headers so the session matches the chosen device.
+Switching the profile changes the simulated user-agent, build IDs, screen metrics, WebGL renderer, RAM, and Client Hints headers so the session matches the chosen device. An unknown value logs a warning and falls back to the default Pixel 10 Pro profile.
 
 ### Optional proxies
 
