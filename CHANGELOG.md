@@ -2,6 +2,11 @@
 
 This file documents the feature baseline of AutoPixel.
 
+## [Unreleased]
+
+### Removed
+- Dropped the `pixel_4a`, `pixel_5_android_11`, `pixel_6`, `pixel_7_pro`, and `pixel_8_pro` device presets. The Google One / Pixel offer is only eligible on the Pixel 10 series, so the bot now simulates the Pixel 10 Pro exclusively and the default profile is `pixel_10_pro`.
+
 ## [1.1.0] - 2026-03-31
 
 ### User-Facing Google One / Pixel Improvements
