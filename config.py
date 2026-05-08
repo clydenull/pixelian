@@ -81,7 +81,8 @@ BOT_HEADER_MEDIA_URL = _env_text(
 
 # ── Device specs – Available device profiles ────────────────────────────────
 # Each preset describes a stock Pixel build that the bot can simulate.
-# Pick one with the DEVICE_PROFILE env var (default: pixel_10_pro).
+# Google One Pixel offer support is limited to the Pixel 10 series, so only
+# those presets are kept here.
 DEVICE_PRESETS: dict[str, dict[str, str]] = {
     "pixel_10_pro": {
         "model": "Pixel 10 Pro",
@@ -93,59 +94,9 @@ DEVICE_PRESETS: dict[str, dict[str, str]] = {
         "accept_language": "en-US,en;q=0.9",
         "locale": "en-US",
     },
-    "pixel_8_pro": {
-        "model": "Pixel 8 Pro",
-        "brand": "google",
-        "manufacturer": "Google",
-        "android_version": "14",
-        "android_sdk": "34",
-        "build_id": "UQ1A.240205.002",
-        "accept_language": "en-US,en;q=0.9",
-        "locale": "en-US",
-    },
-    "pixel_7_pro": {
-        "model": "Pixel 7 Pro",
-        "brand": "google",
-        "manufacturer": "Google",
-        "android_version": "14",
-        "android_sdk": "34",
-        "build_id": "UQ1A.240205.002.B1",
-        "accept_language": "en-US,en;q=0.9",
-        "locale": "en-US",
-    },
-    "pixel_6": {
-        "model": "Pixel 6",
-        "brand": "google",
-        "manufacturer": "Google",
-        "android_version": "14",
-        "android_sdk": "34",
-        "build_id": "UQ1A.240205.004",
-        "accept_language": "en-US,en;q=0.9",
-        "locale": "en-US",
-    },
-    "pixel_5_android_11": {
-        "model": "Pixel 5",
-        "brand": "google",
-        "manufacturer": "Google",
-        "android_version": "11",
-        "android_sdk": "30",
-        "build_id": "RQ3A.211001.001",
-        "accept_language": "en-US,en;q=0.9",
-        "locale": "en-US",
-    },
-    "pixel_4a": {
-        "model": "Pixel 4a",
-        "brand": "google",
-        "manufacturer": "Google",
-        "android_version": "13",
-        "android_sdk": "33",
-        "build_id": "TQ3A.230901.001",
-        "accept_language": "en-US,en;q=0.9",
-        "locale": "en-US",
-    },
 }
 
-DEFAULT_DEVICE_PROFILE = "pixel_5_android_11"
+DEFAULT_DEVICE_PROFILE = "pixel_10_pro"
 DEVICE_PROFILE_NAME = (
     _env_text("DEVICE_PROFILE", DEFAULT_DEVICE_PROFILE).lower().replace("-", "_")
 )
