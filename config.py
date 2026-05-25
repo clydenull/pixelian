@@ -272,32 +272,151 @@ USER_AGENT_TEMPLATES = [
 ]
 
 # ── Google URLs ───────────────────────────────────────────────────────────────
-GMAIL_LOGIN_URL = "https://accounts.google.com/signin/v2/identifier"
+# Sign-in entry point. Google now redirects /signin/v2/* to the modern flow,
+# but the canonical /ServiceLogin endpoint is the most stable hop.
+GMAIL_LOGIN_URL = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fone.google.com%2F"
 GOOGLE_ONE_URL = "https://one.google.com/"
-GOOGLE_ONE_OFFERS_URL = "https://one.google.com/about/plans"
+# Kept as a label for the "general storage plans" surface. The actual scanner
+# walks GOOGLE_ONE_OFFER_URLS in order.
+GOOGLE_ONE_OFFERS_URL = "https://one.google.com/about/google-ai-plans/"
 
-# ── Gemini offer detection keywords ──────────────────────────────────────────
+# Ordered list of pages the offer scanner will navigate when looking for the
+# Google AI Pro / Gemini free-trial offer. Order matters: surfaces that are
+# most likely to expose a direct claim/checkout link come first.
+#
+# As of Google I/O 2026 the AI surface was reorganised:
+#   - AI Plus (200 GB), AI Pro (5 TB), AI Ultra Lite, AI Ultra
+#   - "Try free trial" CTAs were replaced by "Get Plus / Get Pro / Get Ultra"
+#   - The Gemini-direct subscriptions surface gemini.google/subscriptions/
+#     also exposes the same plans with checkout links.
+GOOGLE_ONE_OFFER_URLS: list[str] = [
+    # Pixel-device / promo landing — when eligible, this redirects straight
+    # to a checkout URL with the offer applied.
+    "https://one.google.com/offer",
+    # Modern AI plans surface (replaced /about/plans for AI tiers in 2025-2026).
+    "https://one.google.com/about/google-ai-plans/",
+    # Gemini-direct subscription surface; "Get Pro" and "Get Ultra" buttons here
+    # also lead to the checkout flow.
+    "https://gemini.google/subscriptions/",
+    # Legacy general storage plans page (still hosts Google AI Pro card in
+    # some regions/accounts).
+    "https://one.google.com/about/plans",
+    # Authenticated dashboard — surfaces in-app trial banners for eligible
+    # accounts.
+    "https://one.google.com/",
+]
+
+# ── Google AI / Gemini offer detection keywords ──────────────────────────────
+# Used by the offer scanner against link text, aria-labels, and page bodies.
+# Both the legacy 2024-2025 wording AND the 2026 wording are kept so the
+# scanner is forward- and backward-compatible during regional rollouts.
 GEMINI_OFFER_KEYWORDS = [
+    # Modern (post Google I/O 2026)
+    "google ai pro",
+    "google ai plus",
+    "google ai ultra",
+    "ai pro",
+    "ai plus",
+    "ai ultra",
+    "ai premium",
+    "get pro",
+    "get plus",
+    "get ultra",
+    "try ai pro",
+    "try google ai",
+    "start free trial",
+    "1 month free",
+    "1-month free",
+    "no payment required",
+    "gemini 3 pro",
+    "gemini 3.1 pro",
+    "sign up for a google ai plan",
+    # Legacy / still-encountered (kept for regional rollouts)
     "gemini pro",
     "gemini advanced",
     "12 month",
     "12-month",
+    "12 months free",
     "free trial",
+    "free for 1 month",
     "activate",
     "get started",
     "claim offer",
+    "claim your offer",
     "redeem",
+    "start trial",
+    "mulai uji coba",  # Indonesian
+    "uji coba gratis",  # Indonesian
 ]
 
-# Only accept offer links whose domain matches one of these.
-# This prevents generic keywords ("activate", "get started") from
-# matching unrelated links on Google pages.
+# SKU id fragments emitted on plan-card buttons. Both the modern (post I/O
+# 2026) and legacy patterns are listed so the scanner can recognise them
+# regardless of the rollout window.
+GEMINI_OFFER_SKU_FRAGMENTS = [
+    # Modern plan SKUs
+    "g1.ai_pro",
+    "g1.ai_plus",
+    "g1.ai_ultra",
+    "g1.ai_ultra_lite",
+    "g1.5tb.ai",
+    # Legacy plan SKUs (still seen on regional rollouts)
+    "g1.2tb.ai",
+    "g1.2tb.ai.1month_eft",
+    "g1.2tb.ai.12month_eft",
+    "g1.2tb.ai.annual",
+    "ai_pro_1month_eft",
+    "ai_pro_12month_eft",
+]
+
+# Trial / free-period markers that imply a $0 first period on a plan card.
+GEMINI_OFFER_TRIAL_MARKERS = [
+    "1month_eft",
+    "12month_eft",
+    "free trial",
+    "1 month free",
+    "free for 1 month",
+    "$0",
+    "rp0",
+    "selama 1 bulan",
+    "uji coba",
+    "trial",
+]
+
+# URL fragments / domains that we accept as a legitimate Google AI Pro
+# offer/checkout claim. The check is intentionally generous: any link whose
+# host is whitelisted AND whose path matches one of these markers is a
+# candidate.
+OFFER_URL_FRAGMENTS = [
+    # Direct offer / promo entrypoints
+    "/offer",
+    "/about/google-ai-plans",
+    # Subscription / checkout flows
+    "subscriptions.google.com",
+    "store/subscriptions",
+    "/subscriptions/checkout",
+    "tokenized.play.google.com",
+    "/checkout",
+    "/purchase",
+    # Post-enrollment Gemini destinations (used as success markers)
+    "gemini.google.com/advanced",
+    "gemini.google/subscriptions",
+    # Legacy partner-flow markers (Pixel 2024-2025 promo)
+    "partner-eft-onboard",
+    "BARD_ADVANCED",
+]
+
+# Only accept offer links whose host matches one of these. Combined with
+# OFFER_URL_FRAGMENTS this prevents generic keywords ("activate", "get
+# started") from matching unrelated marketing links.
 OFFER_DOMAIN_WHITELIST = [
     "one.google.com",
     "gemini.google.com",
+    "gemini.google",
     "play.google.com",
     "accounts.google.com",
     "pay.google.com",
+    "subscriptions.google.com",
+    "tokenized.play.google.com",
 ]
 
 # ── Selenium / WebDriver ──────────────────────────────────────────────────────
@@ -327,6 +446,24 @@ PROXY_PRECHECK_ENABLED = _env_flag("PROXY_PRECHECK_ENABLED", "1")
 PROXY_PRECHECK_TIMEOUT_SECONDS = _env_int("PROXY_PRECHECK_TIMEOUT_SECONDS", 12)
 PROXY_DIAGNOSTICS_VERIFY_SSL = _env_flag("PROXY_DIAGNOSTICS_VERIFY_SSL", "0")
 REGENERATE_DEVICE_ON_RETRY = _env_flag("REGENERATE_DEVICE_ON_RETRY", "1")
+
+# ── Anti-detection / Browser persistence ─────────────────────────────────────
+# When enabled, each Google account gets its own persistent Chrome user-data
+# directory under BROWSER_PROFILE_DIR. This is the single biggest anti-
+# detection win for promo eligibility: Google's risk model treats brand-new
+# zero-cookie sessions as high-risk and frequently hides the trial offer
+# from them. A persistent profile keeps cookies, local storage, and cached
+# fingerprint state so the account looks like a returning device on every
+# /check_offer run.
+BROWSER_PERSISTENT_PROFILE = _env_flag("BROWSER_PERSISTENT_PROFILE", "1")
+BROWSER_PROFILE_DIR = _env_text(
+    "BROWSER_PROFILE_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "profiles"),
+)
+# Visit one or two extra Google surfaces (Search, YouTube) before sign-in so
+# Google's risk model sees an organic browsing session instead of a cold
+# direct hit on accounts.google.com.
+BROWSER_DEEP_WARMUP = _env_flag("BROWSER_DEEP_WARMUP", "1")
 
 # ── Email validation ──────────────────────────────────────────────────────────
 # Leave empty to accept any valid email domain (Gmail + Google Workspace).

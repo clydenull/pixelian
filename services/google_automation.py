@@ -190,11 +190,44 @@ def _detect_driver_major_version(chromedriver_path: str | None) -> Optional[int]
     return None
 
 
+def _resolve_profile_dir(email: str | None) -> str | None:
+    """Return a stable per-account Chrome user-data directory path.
+
+    Returns ``None`` when persistent profiles are disabled or no email was
+    provided, so the caller can fall back to a fresh temp profile.
+
+    The dir name is derived from a SHA-256 of the email so it is stable
+    across runs but does not leak the email in the filesystem (e.g.
+    ``logs/profiles/3a7f8c1d…``).
+    """
+    if not config.BROWSER_PERSISTENT_PROFILE:
+        return None
+    if not email:
+        return None
+
+    import hashlib
+
+    digest = hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()[:16]
+    base_dir = config.BROWSER_PROFILE_DIR
+    profile_path = os.path.join(base_dir, digest)
+    try:
+        os.makedirs(profile_path, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "Could not create persistent profile dir %s (%s); falling back to a fresh temp profile.",
+            profile_path,
+            exc,
+        )
+        return None
+    return profile_path
+
+
 def build_driver(
     profile: DeviceProfile,
     headless: Optional[bool] = None,
     proxy_url: str | None = None,
     proxy_session_token: str | None = None,
+    user_data_dir: str | None = None,
 ) -> webdriver.Chrome:
     """Return a Chrome WebDriver configured for the device profile."""
     runtime_proxy_url = resolve_runtime_proxy_url(proxy_url, proxy_session_token)
@@ -212,6 +245,17 @@ def build_driver(
     options.add_argument("--disable-notifications")
     options.add_argument(f"--window-size={SPECS['width']},{SPECS['height']}")
     options.add_argument(f"--user-agent={profile.user_agent}")
+
+    # Persistent per-account user-data directory keeps cookies, local
+    # storage, and IndexedDB state across runs so Google's risk model
+    # sees a returning device instead of a brand-new zero-cookie session.
+    # This is the single biggest anti-detection improvement for promo
+    # eligibility — fresh profiles consistently get the "no offer"
+    # version of the AI plan landing on flagged risk windows.
+    if user_data_dir:
+        options.add_argument(f"--user-data-dir={user_data_dir}")
+        options.add_argument("--profile-directory=Default")
+        logger.info("Using persistent Chrome profile: %s", user_data_dir)
 
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--disable-features=VizDisplayCompositor")
@@ -988,15 +1032,56 @@ def gmail_login(driver: webdriver.Chrome, email: str, password: str) -> str:
             time.sleep(3.5)
         else:
             # --- MULAI INJEKSI WARM-UP ---
+            # Multi-hop warmup builds a believable Google session footprint
+            # before sign-in, instead of the bot's previous "cold direct
+            # hit on accounts.google.com" pattern. Order is intentional:
+            #   1) news.google.com — drops a benign __Secure-1PSID-shaped
+            #      cookie pre-auth.
+            #   2) www.google.com search — establishes the NID cookie
+            #      Google's risk model checks for "real browser" signal.
+            #   3) one.google.com (anonymous) — pre-warms the AI plans
+            #      surface so the post-login fetch is not the first hit.
+            #
+            # Each hop has a humanish dwell time and a small scroll so it
+            # does not look like rapid scripted navigation.
             logger.info("Melakukan pemanasan profil (warm-up) sebelum login...")
-            try:
-                driver.get("https://news.google.com/")
-                time.sleep(random.uniform(3.0, 5.0))
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight/4);")
-                time.sleep(random.uniform(1.0, 2.0))
-            except TimeoutException as exc:
-                logger.warning("Warm-up page load timed out; continuing anyway: %s", exc)
-                _stop_page_load(driver)
+            warmup_targets: list[tuple[str, float, float]] = [
+                ("https://news.google.com/", 3.0, 5.0),
+            ]
+            if config.BROWSER_DEEP_WARMUP:
+                warmup_targets.extend([
+                    ("https://www.google.com/search?q=pixel+10+pro+review", 2.5, 4.0),
+                    ("https://one.google.com/about/google-ai-plans/", 2.0, 3.5),
+                ])
+
+            for target_url, min_dwell, max_dwell in warmup_targets:
+                try:
+                    driver.get(target_url)
+                    time.sleep(random.uniform(min_dwell, max_dwell))
+                    try:
+                        driver.execute_script(
+                            "window.scrollTo(0, document.body.scrollHeight/"
+                            f"{random.choice([3, 4, 5])});"
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(random.uniform(0.8, 1.6))
+                except TimeoutException as exc:
+                    logger.warning(
+                        "Warm-up page load timed out for %s; continuing anyway: %s",
+                        target_url,
+                        exc,
+                    )
+                    _stop_page_load(driver)
+                except WebDriverException as exc:
+                    # Don't let a warm-up hop break the whole login. If a
+                    # warmup target is blocked by the proxy provider, we
+                    # still want to attempt the actual sign-in.
+                    logger.warning(
+                        "Warm-up navigation failed for %s, continuing: %s",
+                        target_url,
+                        exc,
+                    )
             # --- AKHIR INJEKSI WARM-UP ---
 
         try:
@@ -1144,39 +1229,107 @@ def submit_totp_code(driver: webdriver.Chrome, code: str) -> bool:
 # Offer scanning
 
 
+def _normalize_html_text(driver: webdriver.Chrome) -> str:
+    """Return a lowercased copy of the current page source (best-effort)."""
+    try:
+        return (driver.page_source or "").lower()
+    except Exception:
+        return ""
+
+
+def _dismiss_interstitials(driver: webdriver.Chrome) -> None:
+    """Best-effort dismissal of consent / cookie / region interstitials.
+
+    Many proxy egress IPs land on `consent.google.com` (EU GDPR) or trigger
+    the "before you continue" cookie sheet on `one.google.com`. Without
+    clicking through, the Google AI Pro plan cards never render, so the
+    offer scanner sees a stub page and fails. This helper tries a small set
+    of well-known "Accept all / I agree / Continue" selectors.
+    """
+    selectors = (
+        # Cookie / consent
+        'button[aria-label="Accept all"]',
+        'button[aria-label="I agree"]',
+        'button[aria-label="Agree to all"]',
+        'button[aria-label="Reject all"]',
+        'button[jsname="higCR"]',
+        'button[jsname="b3VHJd"]',
+        'form[action*="consent"] button[type="submit"]',
+        '[data-action="accept"]',
+        '[data-action="continue"]',
+        # "Use without an account" / "Continue" on consent.google.com
+        'a[href*="consent"][role="button"]',
+    )
+    for selector in selectors:
+        try:
+            element = driver.find_element(By.CSS_SELECTOR, selector)
+            if element.is_displayed():
+                try:
+                    element.click()
+                except WebDriverException:
+                    driver.execute_script("arguments[0].click();", element)
+                time.sleep(1.0)
+                return
+        except NoSuchElementException:
+            continue
+        except StaleElementReferenceException:
+            continue
+
+
 def diagnose_google_one_page(driver: webdriver.Chrome) -> str | None:
     """Return a short diagnosis string for the current Google One page."""
-    try:
-        page_source = driver.page_source.lower()
-    except Exception:
+    page_source = _normalize_html_text(driver)
+    if not page_source:
         return None
 
-    paid_ai_markers = (
+    # 2026 plan-tier markers (post Google I/O 2026 redesign).
+    modern_plan_markers = (
         "google ai pro",
-        "ai premium",
-        "g1.2tb.ai",
-        "g1.2tb.ai.annual",
+        "google ai plus",
+        "google ai ultra",
+        "ai ultra lite",
+        "more magic in your ai plan",
+        "more power, more perks",
+        "5 tb storage",
+        "gemini 3 pro",
+        "gemini 3.1 pro",
+        "antigravity",
     )
+    paid_ai_markers = (
+        "ai premium",
+    ) + tuple(fragment.lower() for fragment in config.GEMINI_OFFER_SKU_FRAGMENTS)
     free_offer_markers = (
         "partner-eft-onboard",
         "bard_advanced",
         "claim offer",
+        "claim your offer",
         "redeem",
         "free trial",
-        "12-month",
-        "12 month",
+        "1 month free",
+        "1-month free",
+        "free for 1 month",
+        "12 months free",
+        "no payment required",
         "freetrial",
         "freetrialperiod",
         "start trial",
+        "start free trial",
+        "try ai pro",
+        "try google ai",
         "mulai uji coba",
+        "uji coba gratis",
         "$0/bln",
         "selama 1 bulan",
-        "data-sku-id=\"g1.2tb.ai.1month_eft\"",
-        "data-sku-id=\"g1.2tb.1month_eft\"",
+        '"1month_eft"',
+        '"12month_eft"',
     )
 
-    if any(marker in page_source for marker in free_offer_markers):
-        if any(marker in page_source for marker in paid_ai_markers):
+    has_modern_plans = any(marker in page_source for marker in modern_plan_markers)
+    has_free_offer = any(marker in page_source for marker in free_offer_markers)
+    has_paid_ai = any(marker in page_source for marker in paid_ai_markers)
+
+    if has_free_offer:
+        if has_modern_plans or has_paid_ai:
             return (
                 "Google One shows an embedded Google AI trial offer on the plans page, "
                 "but AutoPixel did not capture the checkout link automatically."
@@ -1186,7 +1339,13 @@ def diagnose_google_one_page(driver: webdriver.Chrome) -> str | None:
             "but AutoPixel did not capture the checkout link automatically."
         )
 
-    if any(marker in page_source for marker in paid_ai_markers):
+    if has_modern_plans:
+        return (
+            "Google One shows the post-I/O 2026 AI plan landing (Plus / Pro / Ultra) "
+            "but no free-trial CTA was visible for this account."
+        )
+
+    if has_paid_ai:
         return (
             "Google One shows regular paid Google AI Pro plans for this account, "
             "but no free promo claim link was present."
@@ -1195,12 +1354,51 @@ def diagnose_google_one_page(driver: webdriver.Chrome) -> str | None:
     if "paket anda saat ini" in page_source or "your current plan" in page_source:
         return "Google One loaded your normal account plan page, but no promo card was present."
 
+    if "consent.google.com" in (driver.current_url or "").lower():
+        return (
+            "Google routed the session through its consent / cookie interstitial. "
+            "AutoPixel could not auto-dismiss it, so the AI plan cards never rendered."
+        )
+
     return None
 
 
+def _url_host(url: str) -> str:
+    """Return the lowercased hostname for a URL, or '' on parse failure."""
+    try:
+        return (urlparse(url or "").hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _url_in_whitelist(url: str) -> bool:
+    """Return True when the URL host matches OFFER_DOMAIN_WHITELIST."""
+    host = _url_host(url)
+    if not host:
+        return False
+    return any(host == allowed or host.endswith("." + allowed) for allowed in config.OFFER_DOMAIN_WHITELIST)
+
+
 def is_correct_offer_url(url: str) -> bool:
-    """Return True for expected Pixel Gemini offer claim URL pattern."""
-    return bool(url) and "partner-eft-onboard" in url
+    """Return True when *url* looks like a real Google AI Pro / Gemini offer link.
+
+    Modernised for the post Google I/O 2026 surface: accepts any whitelisted
+    host whose path or query string contains one of the known offer / checkout
+    markers. The legacy `partner-eft-onboard` marker is still matched so older
+    Pixel partner promos remain detectable.
+    """
+    if not url:
+        return False
+
+    normalized = url.strip()
+    if not normalized or normalized.lower().startswith(("javascript:", "mailto:", "about:")):
+        return False
+
+    if not _url_in_whitelist(normalized):
+        return False
+
+    lowered = normalized.lower()
+    return any(fragment.lower() in lowered for fragment in config.OFFER_URL_FRAGMENTS)
 
 
 def _looks_like_checkout_url(url: str) -> bool:
@@ -1212,33 +1410,55 @@ def _looks_like_checkout_url(url: str) -> bool:
             "partner-eft-onboard",
             "subscriptions/checkout",
             "store.google.com/subscriptions/checkout",
-            "play.google.com",
+            "subscriptions.google.com",
             "tokenized.play.google.com",
-            "purchase",
-            "buy",
+            "play.google.com/store/subscriptions",
+            "pay.google.com",
+            "/checkout",
+            "/purchase",
+            "/buy",
+            "gemini.google.com/advanced",
+            "gemini.google/subscriptions",
+            "one.google.com/offer",
         )
     )
 
 
 def _trial_button_priority(button: WebElement) -> tuple[int, str]:
     """Rank trial buttons so AI/Gemini-related monthly trials are preferred."""
-    sku_id = (button.get_attribute("data-sku-id") or "").lower()
-    label = " ".join(
-        part
-        for part in (
-            button.get_attribute("aria-label") or "",
-            button.text or "",
-            button.get_attribute("data-formatted-price") or "",
-        )
-    ).lower()
+    try:
+        sku_id = (button.get_attribute("data-sku-id") or "").lower()
+        label = " ".join(
+            part
+            for part in (
+                button.get_attribute("aria-label") or "",
+                button.text or "",
+                button.get_attribute("data-formatted-price") or "",
+                button.get_attribute("jsname") or "",
+            )
+        ).lower()
+    except StaleElementReferenceException:
+        return (0, "")
 
     score = 0
-    if ".ai." in sku_id or "ai pro" in label or "gemini" in label:
-        score += 100
-    if "2tb" in sku_id or "2 tb" in label:
+    # Strongly prefer AI Pro (the Pixel free-trial target).
+    if "ai_pro" in sku_id or "google ai pro" in label or "get pro" in label:
+        score += 200
+    elif ".ai." in sku_id or "ai pro" in label or "ai premium" in label:
+        score += 150
+    elif "ai_plus" in sku_id or "google ai plus" in label or "get plus" in label:
+        score += 80
+    elif "gemini" in label:
+        score += 60
+    # Prefer the tier with the historical free-trial wrapper.
+    if "12month" in sku_id or "12 month" in label or "12-month" in label:
+        score += 40
+    if "1month" in sku_id or "1 month" in label or "1-month" in label:
         score += 30
-    if "1month" in sku_id or "trial" in label or "uji coba" in label:
-        score += 10
+    if any(marker in sku_id or marker in label for marker in ("trial", "free", "$0", "rp0", "uji coba")):
+        score += 20
+    if "5tb" in sku_id or "5 tb" in label or "2tb" in sku_id or "2 tb" in label:
+        score += 15
     return (-score, sku_id)
 
 
@@ -1246,9 +1466,15 @@ def _capture_checkout_after_trial_click(
     driver: webdriver.Chrome,
     button: WebElement,
 ) -> Optional[str]:
-    """Click a Google One trial button and try to capture the checkout URL."""
+    """Click a Google One trial button and try to capture the checkout URL.
+
+    Also walks every open tab/window in case Google opened the checkout in a
+    popup (`target="_blank"`) — the modern "Get Pro" button on
+    ``gemini.google/subscriptions/`` does that on some rollouts.
+    """
     before_url = driver.current_url
     before_handles = list(driver.window_handles)
+    original_handle = driver.current_window_handle
 
     try:
         driver.execute_script(
@@ -1265,10 +1491,25 @@ def _capture_checkout_after_trial_click(
         try:
             driver.execute_script("arguments[0].click();", button)
         except Exception as exc:
-            logger.warning("Failed to click Google One trial button: %s", exc)
+            logger.warning("Failed to click Google One plan button: %s", exc)
             return None
 
-    deadline = time.time() + 12
+    def _scan_all_tabs_for_checkout() -> Optional[str]:
+        try:
+            handles = list(driver.window_handles)
+        except Exception:
+            return None
+        for handle in handles:
+            try:
+                driver.switch_to.window(handle)
+                url = driver.current_url or ""
+            except Exception:
+                continue
+            if url and (_looks_like_checkout_url(url) or is_correct_offer_url(url)):
+                return url
+        return None
+
+    deadline = time.time() + 15
     while time.time() < deadline:
         try:
             current_handles = list(driver.window_handles)
@@ -1286,56 +1527,141 @@ def _capture_checkout_after_trial_click(
         except Exception:
             current_url = ""
 
-        if current_url and current_url != before_url and _looks_like_checkout_url(current_url):
+        if (
+            current_url
+            and current_url != before_url
+            and (_looks_like_checkout_url(current_url) or is_correct_offer_url(current_url))
+        ):
             return current_url
+
+        # Walk every open tab in case the checkout opened in a popup.
+        popup_url = _scan_all_tabs_for_checkout()
+        if popup_url:
+            return popup_url
 
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             for frame in iframes:
                 src = (frame.get_attribute("src") or "").strip()
-                if src and _looks_like_checkout_url(src):
+                if src and (_looks_like_checkout_url(src) or is_correct_offer_url(src)):
                     return src
         except Exception:
             pass
 
         time.sleep(0.5)
 
+    # Final sweep — restore focus to the original tab if nothing matched.
+    try:
+        driver.switch_to.window(original_handle)
+    except Exception:
+        pass
+
     return None
 
 
+def _looks_like_plan_button_label(label: str, sku_id: str) -> bool:
+    """Return True when a button label/sku-id looks like a Google AI plan CTA.
+
+    This is intentionally permissive so 2026 buttons that say only "Get Pro"
+    or "Get Plus" (without `data-sku-id`) are still picked up.
+    """
+    label = label.lower()
+    sku_id = sku_id.lower()
+
+    # SKU-based — strongest signal.
+    if any(fragment in sku_id for fragment in (frag.lower() for frag in config.GEMINI_OFFER_SKU_FRAGMENTS)):
+        return True
+
+    # Label-based — modern + legacy CTA wording.
+    cta_phrases = (
+        "get pro",
+        "get plus",
+        "get ultra",
+        "try ai pro",
+        "try google ai",
+        "start trial",
+        "start free trial",
+        "claim offer",
+        "claim your offer",
+        "redeem",
+        "free trial",
+        "1 month free",
+        "1-month free",
+        "12 month",
+        "12-month",
+        "uji coba",
+        "mulai uji coba",
+        "sign up for a google ai plan",
+    )
+    return any(phrase in label for phrase in cta_phrases)
+
+
 def extract_trial_button_link(driver: webdriver.Chrome) -> Optional[str]:
-    """Try to launch a Google One trial checkout from page buttons."""
-    try:
-        buttons = driver.find_elements(By.CSS_SELECTOR, "button[data-sku-id]")
-    except Exception:
-        return None
+    """Try to launch a Google AI plan checkout from page buttons.
 
+    Updated for 2026 plan cards: picks up modern "Get Pro / Get Plus / Get
+    Ultra" buttons that no longer carry a `data-sku-id` attribute, while
+    still preferring SKU-tagged trial buttons when they exist.
+    """
+    candidate_selectors = (
+        "button[data-sku-id]",
+        # Modern AI plan card CTAs commonly use these patterns.
+        'a[role="button"][href*="checkout"]',
+        'a[role="button"][href*="/offer"]',
+        'a[href*="subscriptions.google.com"]',
+        'a[href*="play.google.com/store/subscriptions"]',
+        'button[jsname]',
+    )
+
+    seen_ids: set[int] = set()
     candidates: list[WebElement] = []
-    for button in buttons:
+
+    for selector in candidate_selectors:
         try:
-            sku_id = (button.get_attribute("data-sku-id") or "").lower()
-            label = " ".join(
-                part
-                for part in (
-                    button.get_attribute("aria-label") or "",
-                    button.text or "",
-                    button.get_attribute("data-formatted-price") or "",
-                )
-            ).lower()
-        except StaleElementReferenceException:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
             continue
 
-        if not sku_id:
-            continue
-        if (
-            "1month" in sku_id
-            or "trial" in label
-            or "uji coba" in label
-            or "start trial" in label
-        ):
-            candidates.append(button)
+        for element in elements:
+            element_id = id(element)
+            if element_id in seen_ids:
+                continue
+
+            try:
+                sku_id = (element.get_attribute("data-sku-id") or "").lower()
+                href = (element.get_attribute("href") or "").lower()
+                label_parts = (
+                    element.get_attribute("aria-label") or "",
+                    element.text or "",
+                    element.get_attribute("data-formatted-price") or "",
+                )
+                label = " ".join(part for part in label_parts).lower()
+            except StaleElementReferenceException:
+                continue
+            except Exception:
+                continue
+
+            # Skip obvious negatives (footer / disclaimer links).
+            if href and not _url_in_whitelist(href) and "checkout" not in href and "/offer" not in href:
+                continue
+
+            if not _looks_like_plan_button_label(label, sku_id) and not href:
+                continue
+
+            seen_ids.add(element_id)
+            candidates.append(element)
 
     for button in sorted(candidates, key=_trial_button_priority):
+        # If the candidate is itself an `<a>` with a usable href, return it
+        # directly without clicking (avoids losing context on multi-page redirects).
+        try:
+            href = (button.get_attribute("href") or "").strip()
+        except Exception:
+            href = ""
+
+        if href and (is_correct_offer_url(href) or _looks_like_checkout_url(href)):
+            return href
+
         link = _capture_checkout_after_trial_click(driver, button)
         if link:
             return link
@@ -1344,9 +1670,13 @@ def extract_trial_button_link(driver: webdriver.Chrome) -> Optional[str]:
 
 
 def extract_payment_link(driver: webdriver.Chrome) -> Optional[str]:
-    """Scan current page for Gemini Pro offer activation link."""
-    all_links = driver.find_elements(By.TAG_NAME, "a")
+    """Scan the current page for a Google AI Pro / Gemini offer activation link."""
+    try:
+        all_links = driver.find_elements(By.TAG_NAME, "a")
+    except Exception:
+        all_links = []
 
+    # 1) Direct hrefs whose URL already looks like a real offer claim.
     for link in all_links:
         try:
             href = link.get_attribute("href") or ""
@@ -1355,11 +1685,15 @@ def extract_payment_link(driver: webdriver.Chrome) -> Optional[str]:
         except Exception:
             continue
 
+    # 2) Plan-card buttons (modern: "Get Pro", legacy: data-sku-id trial).
     trial_link = extract_trial_button_link(driver)
     if trial_link:
         return trial_link
 
-    keywords = config.GEMINI_OFFER_KEYWORDS
+    # 3) Anchor whose visible text/aria-label matches an offer keyword AND
+    #    whose href is an accepted offer URL. Rejects "LOCKED" placeholders
+    #    that Google sometimes emits on partner-promo pages.
+    keywords = [k.lower() for k in config.GEMINI_OFFER_KEYWORDS]
     for link in all_links:
         try:
             text = (link.text + " " + (link.get_attribute("aria-label") or "")).lower()
@@ -1371,14 +1705,8 @@ def extract_payment_link(driver: webdriver.Chrome) -> Optional[str]:
         except Exception:
             continue
 
-    for link in all_links:
-        try:
-            href = link.get_attribute("href") or ""
-            if is_correct_offer_url(href):
-                return href
-        except Exception:
-            continue
-
+    # 4) Legacy LOCKED / BARD_ADVANCED partner-promo unlock dance — kept so
+    #    older Pixel partner pages still resolve when the user lands on them.
     for link in all_links:
         try:
             href = link.get_attribute("href") or ""
@@ -1408,30 +1736,46 @@ def extract_payment_link(driver: webdriver.Chrome) -> Optional[str]:
 
 
 def navigate_google_one(driver: webdriver.Chrome) -> Optional[str]:
-    """Navigate Google One pages and attempt to find the offer link."""
-    for url in (config.GOOGLE_ONE_OFFERS_URL, config.GOOGLE_ONE_URL):
+    """Navigate Google One / Gemini surfaces and try to find an offer link.
+
+    Walks `config.GOOGLE_ONE_OFFER_URLS` in order. The first surface that
+    yields an offer link wins. Each visit also gets a chance to dismiss
+    consent/cookie interstitials so the plan cards actually render.
+    """
+    candidate_urls = list(config.GOOGLE_ONE_OFFER_URLS)
+    # Always try the historical pair last as a fallback if not already listed.
+    for fallback in (config.GOOGLE_ONE_OFFERS_URL, config.GOOGLE_ONE_URL):
+        if fallback and fallback not in candidate_urls:
+            candidate_urls.append(fallback)
+
+    for url in candidate_urls:
         try:
             logger.info("Navigating to %s", url)
-            driver.get(url)
+            try:
+                driver.get(url)
+            except TimeoutException as exc:
+                logger.warning("Timeout loading %s, attempting to continue: %s", url, exc)
+                _stop_page_load(driver)
             time.sleep(3)
 
-            for selector in (
-                '[aria-label="Accept all"]',
-                'button[jsname="higCR"]',
-                '[data-action="accept"]',
-            ):
-                try:
-                    driver.find_element(By.CSS_SELECTOR, selector).click()
-                    time.sleep(1)
-                    break
-                except NoSuchElementException:
-                    continue
+            _dismiss_interstitials(driver)
+
+            # If Google bounced us straight to a checkout / offer URL,
+            # capture it without scanning further.
+            try:
+                landed_url = driver.current_url or ""
+            except Exception:
+                landed_url = ""
+            if landed_url and (is_correct_offer_url(landed_url) or _looks_like_checkout_url(landed_url)):
+                logger.info("Landing URL itself is an offer/checkout URL: %s", landed_url)
+                return landed_url
 
             link = extract_payment_link(driver)
             if link:
                 return link
         except (TimeoutException, WebDriverException) as exc:
             logger.warning("Error accessing %s: %s", url, exc)
+            continue
 
     return None
 
@@ -1511,16 +1855,19 @@ def start_login(
             device.session_id,
         )
         effective_headless = False
+    user_data_dir = _resolve_profile_dir(email)
     logger.info(
-        "Starting WebDriver for session %s (headless=%s)",
+        "Starting WebDriver for session %s (headless=%s, persistent=%s)",
         device.session_id,
         effective_headless,
+        bool(user_data_dir),
     )
     driver = build_driver(
         device,
         headless=effective_headless,
         proxy_url=proxy_url,
         proxy_session_token=proxy_session_token,
+        user_data_dir=user_data_dir,
     )
 
     try:
@@ -1555,6 +1902,7 @@ def start_login(
                 headless=False,
                 proxy_url=proxy_url,
                 proxy_session_token=proxy_session_token,
+                user_data_dir=user_data_dir,
             )
             try:
                 status = gmail_login(retry_driver, email, password)

@@ -4,6 +4,67 @@ This file documents the feature baseline of AutoPixel.
 
 ## [Unreleased]
 
+### Anti-detection improvements (round 2)
+The single biggest blocker for showing a free-trial CTA to an eligible
+account is Google's risk model flagging the session. The previous build
+gave Google three obvious "this is a bot" signals: zero cookies / zero
+history on every login, a cold direct hit on `accounts.google.com`, and
+a handful of automation tells leaking through despite undetected-
+chromedriver. This round closes all three.
+
+#### Persistent per-account Chrome profile
+- New `BROWSER_PERSISTENT_PROFILE` flag (default **on**) and
+  `BROWSER_PROFILE_DIR` (default `<repo>/logs/profiles/`). Each Google
+  account gets its own SHA-256-hashed user-data directory so cookies,
+  local storage, IndexedDB, and cached fingerprint state survive across
+  `/check_offer` runs.
+- Real Pixel users have history. Without persistence, every login looked
+  like a brand-new factory-reset device with no Google session, which is
+  exactly the risk profile that gets the "no offer" version of the AI
+  plans page. With persistence, the second run onwards looks like a
+  returning device.
+- Profile dirs are gitignored (`profiles/`) so they never accidentally
+  end up in commits.
+
+#### Deeper organic warmup before sign-in
+- New `BROWSER_DEEP_WARMUP` flag (default **on**). Pre-login, the bot
+  now walks Google News → a Google Search query → `one.google.com`
+  anonymously before navigating to `accounts.google.com`, with humanish
+  dwell times and small scrolls between hops. This drops the NID cookie
+  Google's risk model checks and avoids the "cold direct hit" pattern
+  that the previous warmup (single hop to news.google.com) still
+  exhibited.
+
+#### Closed automation tells in `navigator_overrides_js`
+- `navigator.permissions.query({name:"notifications"})` now returns the
+  same `state="default"` real Chrome would, instead of the headless-only
+  `state="denied"` response.
+- `window.chrome` now exposes a populated `runtime` (with stub
+  `connect` / `sendMessage`), `csi`, `loadTimes`, and `app` surface that
+  matches real Chrome. Headless ships with most of those undefined.
+- `navigator.plugins` and `navigator.mimeTypes` now expose a believable
+  Chrome PDF Viewer entry instead of the empty arrays headless returns.
+- WebGL parameter overrides extended beyond vendor/renderer to cover
+  `MAX_TEXTURE_SIZE`, `MAX_CUBE_MAP_TEXTURE_SIZE`, `MAX_VERTEX_ATTRIBS`,
+  `MAX_VARYING_VECTORS`, `MAX_VERTEX_TEXTURE_IMAGE_UNITS`,
+  `MAX_VERTEX_UNIFORM_VECTORS`, `MAX_FRAGMENT_UNIFORM_VECTORS`,
+  `MAX_RENDERBUFFER_SIZE`, `VERSION`, and `SHADING_LANGUAGE_VERSION`,
+  with Pixel-class GPU baselines so they don't contradict the spoofed
+  Adreno/Mali renderer string.
+
+### Fixed (Google I/O 2026 surface modernization)
+- **Offer scanner aligned with the post Google I/O 2026 Google AI subscription redesign.** The previous scanner only knew about the 2024-2025 layout (`/about/plans` page, `partner-eft-onboard` claim links, and `g1.2tb.ai.*` SKUs), so accounts that landed on the new AI plan landing got "no offer found" even when an eligible trial CTA was on screen.
+- **`config.GOOGLE_ONE_OFFER_URLS`** is now an ordered candidate list instead of two hard-coded URLs. The scanner now walks `one.google.com/offer` (Pixel/promo landing), `one.google.com/about/google-ai-plans/` (modern AI surface), `gemini.google/subscriptions/`, the legacy `/about/plans`, and the `/` dashboard, in that order, and returns as soon as one of them surfaces a valid claim link.
+- **`config.GEMINI_OFFER_KEYWORDS`** expanded with the modern wording (`google ai pro`, `google ai plus`, `google ai ultra`, `get pro`, `get plus`, `get ultra`, `try ai pro`, `start free trial`, `1 month free`, `no payment required`, `gemini 3 pro`, `sign up for a google ai plan`) and Indonesian variants while keeping the legacy phrases.
+- **`config.GEMINI_OFFER_SKU_FRAGMENTS`** added so the scanner recognises the new `g1.ai_pro`, `g1.ai_plus`, `g1.ai_ultra*`, and `g1.5tb.ai` SKU prefixes alongside the legacy `g1.2tb.ai*` patterns.
+- **`config.OFFER_URL_FRAGMENTS`** + **`config.OFFER_DOMAIN_WHITELIST`** rewritten as composable lists: any whitelisted host whose path/query contains a known offer marker is accepted. Modern checkout/offer hosts like `subscriptions.google.com`, `tokenized.play.google.com`, `gemini.google.com/advanced`, and `gemini.google/subscriptions` are now recognised.
+- **`is_correct_offer_url()` rewritten** to be host-aware and pattern-based instead of matching only the legacy `partner-eft-onboard` substring. Old partner-promo URLs still match.
+- **`extract_trial_button_link()` rewritten** to handle 2026 plan-card CTAs that no longer carry `data-sku-id` attributes (e.g. plain "Get Pro" / "Get Plus" buttons). The new ranker prefers `ai_pro` SKUs and `Get Pro` labels for the Pixel free-trial path, falls back through `ai_plus` and Gemini-tagged buttons, and follows direct hrefs without an unnecessary click when the anchor already points at a checkout URL.
+- **`diagnose_google_one_page()` updated** with post-I/O 2026 plan markers (`google ai plus`, `google ai ultra`, `5 tb storage`, `gemini 3 pro`, `antigravity`) and a dedicated diagnosis when Google bounces the session into its `consent.google.com` interstitial.
+- **New `_dismiss_interstitials()` helper** runs on every navigation step and tries a wider set of "Accept all / I agree / Continue" selectors, including the EU consent form, so AI plan cards actually render on proxy-egress IPs that route through the consent flow.
+- **Login URL hardened.** `GMAIL_LOGIN_URL` now uses the canonical `accounts.google.com/ServiceLogin` endpoint with a Google One continuation, replacing the deprecated `/signin/v2/identifier`.
+- **New diagnostic i18n keys** (`offer_diag_modern_plans_no_trial`, `offer_diag_consent_blocked`) so users see a clear, actionable hint when the bot lands on the new AI plan layout without a trial CTA, or gets stuck on the consent interstitial.
+
 ### Added
 - Added per-user device profile selection inside the bot. Each Telegram user can now run `/device` (or tap the new **📱 Pick Device** button on the Control Panel) to choose which Pixel preset the bot should simulate for their session. The selection is stored per chat and is applied automatically the next time a device profile is generated (e.g. on `/login`, `/check_offer`, `/rotate_proxy`, `/disable_proxy`). Active sessions are refreshed in place when a new device is picked.
 - Added `pixel_9_pro`, `pixel_9_pro_xl`, `pixel_9_pro_fold`, `pixel_10_pro_xl`, and `pixel_10_pro_fold` device presets. These are the Pixel models eligible for the Google One AI Premium (2 TB) 12-month trial, in addition to the existing `pixel_10_pro` default.

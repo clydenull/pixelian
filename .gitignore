@@ -15,6 +15,7 @@ venv/
 # Logs
 *.log
 logs/
+profiles/
 
 # Temporary local debug helpers
 tmp_*.py
