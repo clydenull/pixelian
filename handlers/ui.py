@@ -225,6 +225,15 @@ I18N = {
             "Google One shows an embedded free-trial offer on the plans page, "
             "but AutoPixel did not capture the checkout link automatically."
         ),
+        "offer_diag_modern_plans_no_trial": (
+            "Google One loaded the post-I/O 2026 AI plan landing (Plus / Pro / Ultra), "
+            "but no free-trial CTA was visible for this account/region."
+        ),
+        "offer_diag_consent_blocked": (
+            "Google routed the session through its consent / cookie interstitial. "
+            "AutoPixel could not auto-dismiss it, so the AI plan cards never rendered. "
+            "Try /rotate_proxy to a different region or /disable_proxy."
+        ),
         "lang_set": "🌐 Language set to English.",
         "login_prompt_email": (
             "📧 [·] Login\n"
@@ -550,6 +559,15 @@ I18N = {
         "offer_diag_embedded_trial": (
             "Google One menampilkan offer trial yang tertanam di halaman paket, "
             "tetapi AutoPixel belum berhasil menangkap link checkout secara otomatis."
+        ),
+        "offer_diag_modern_plans_no_trial": (
+            "Google One memuat halaman paket AI baru pasca-I/O 2026 (Plus / Pro / Ultra), "
+            "tetapi tidak ada CTA trial gratis yang terlihat untuk akun/region ini."
+        ),
+        "offer_diag_consent_blocked": (
+            "Google mengarahkan sesi ke interstitial consent / cookie. "
+            "AutoPixel tidak berhasil menutupnya secara otomatis, sehingga kartu paket AI tidak ter-render. "
+            "Coba /rotate_proxy ke region lain atau /disable_proxy."
         ),
         "lang_set": "🌐 Bahasa diubah ke Indonesia.",
         "login_prompt_email": (

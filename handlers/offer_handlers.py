@@ -66,6 +66,14 @@ DIAGNOSTIC_I18N_KEYS = {
         "Google One shows an embedded free-trial offer on the plans page, "
         "but AutoPixel did not capture the checkout link automatically."
     ): "offer_diag_embedded_trial",
+    (
+        "Google One shows the post-I/O 2026 AI plan landing (Plus / Pro / Ultra) "
+        "but no free-trial CTA was visible for this account."
+    ): "offer_diag_modern_plans_no_trial",
+    (
+        "Google routed the session through its consent / cookie interstitial. "
+        "AutoPixel could not auto-dismiss it, so the AI plan cards never rendered."
+    ): "offer_diag_consent_blocked",
 }
 
 
