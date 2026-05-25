@@ -568,6 +568,206 @@ class DeviceProfile:
 
             defineGetter(navigator, "webdriver", undefined);
 
+            // === Additional automation tells closed for 2026 ===
+            // navigator.webdriver === undefined is the obvious one. Below
+            // are the OTHER classic tells Google checks:
+            //   - navigator.permissions.query({{name:"notifications"}})
+            //     returns state="denied" under headless Chrome but "default"
+            //     under real Chrome. Patch it.
+            //   - window.chrome on real Chrome has a populated runtime /
+            //     loadTimes / csi / app surface; headless ships with little
+            //     or none. Mock it.
+            //   - navigator.plugins / navigator.mimeTypes are empty arrays
+            //     under headless. Real Chrome on Android still exposes a
+            //     PDF Viewer entry. Provide a believable one.
+            //   - WebGL parameter getters above cover only vendor + renderer.
+            //     Bot-detection scripts also probe MAX_TEXTURE_SIZE,
+            //     MAX_VARYING_VECTORS, MAX_VERTEX_ATTRIBS, VERSION,
+            //     SHADING_LANGUAGE_VERSION etc. Round those to plausible
+            //     Pixel-class GPU values so they don't contradict the
+            //     spoofed renderer string.
+
+            try {{
+                if (navigator.permissions && navigator.permissions.query) {{
+                    const origQuery = navigator.permissions.query.bind(navigator.permissions);
+                    const patchedQuery = (parameters) => {{
+                        const name = parameters && parameters.name ? String(parameters.name) : "";
+                        if (name === "notifications") {{
+                            return Promise.resolve({{
+                                state: typeof Notification !== "undefined" && Notification.permission
+                                    ? Notification.permission
+                                    : "default",
+                                onchange: null,
+                            }});
+                        }}
+                        return origQuery(parameters);
+                    }};
+                    fnsToMask.push({{ ref: patchedQuery, name: "query" }});
+                    Object.defineProperty(navigator.permissions, "query", {{
+                        value: patchedQuery,
+                        configurable: true,
+                    }});
+                }}
+            }} catch (error) {{}}
+
+            try {{
+                const realChromeStub = window.chrome || {{}};
+                const csi = () => ({{
+                    onloadT: Date.now(),
+                    pageT: Math.floor(Math.random() * 5000),
+                    startE: Date.now() - Math.floor(Math.random() * 5000),
+                    tran: 15,
+                }});
+                const loadTimes = () => ({{
+                    commitLoadTime: (Date.now() - Math.floor(Math.random() * 5000)) / 1000,
+                    connectionInfo: "h2",
+                    finishDocumentLoadTime: (Date.now() - Math.floor(Math.random() * 4000)) / 1000,
+                    finishLoadTime: (Date.now() - Math.floor(Math.random() * 3000)) / 1000,
+                    firstPaintAfterLoadTime: 0,
+                    firstPaintTime: (Date.now() - Math.floor(Math.random() * 4500)) / 1000,
+                    navigationType: "Other",
+                    npnNegotiatedProtocol: "h2",
+                    requestTime: (Date.now() - 6000) / 1000,
+                    startLoadTime: (Date.now() - 5500) / 1000,
+                    wasAlternateProtocolAvailable: false,
+                    wasFetchedViaSpdy: true,
+                    wasNpnNegotiated: true,
+                }});
+                const stubRuntime = realChromeStub.runtime || {{}};
+                if (typeof stubRuntime.id === "undefined") {{
+                    Object.defineProperty(stubRuntime, "id", {{
+                        get: () => undefined,
+                        configurable: true,
+                    }});
+                }}
+                if (typeof stubRuntime.connect !== "function") {{
+                    stubRuntime.connect = () => ({{
+                        disconnect: () => {{}},
+                        onMessage: {{
+                            addListener: () => {{}},
+                            removeListener: () => {{}},
+                        }},
+                        postMessage: () => {{}},
+                    }});
+                }}
+                if (typeof stubRuntime.sendMessage !== "function") {{
+                    stubRuntime.sendMessage = () => {{}};
+                }}
+                realChromeStub.runtime = stubRuntime;
+                realChromeStub.csi = csi;
+                realChromeStub.loadTimes = loadTimes;
+                if (!realChromeStub.app) {{
+                    realChromeStub.app = {{
+                        InstallState: {{
+                            DISABLED: "disabled",
+                            INSTALLED: "installed",
+                            NOT_INSTALLED: "not_installed",
+                        }},
+                        RunningState: {{
+                            CANNOT_RUN: "cannot_run",
+                            READY_TO_RUN: "ready_to_run",
+                            RUNNING: "running",
+                        }},
+                        getDetails: () => null,
+                        getIsInstalled: () => false,
+                        isInstalled: false,
+                    }};
+                }}
+                Object.defineProperty(window, "chrome", {{
+                    value: realChromeStub,
+                    configurable: true,
+                    writable: true,
+                }});
+            }} catch (error) {{}}
+
+            try {{
+                const pdfPlugin = {{
+                    name: "Chrome PDF Plugin",
+                    description: "Portable Document Format",
+                    filename: "internal-pdf-viewer",
+                    length: 1,
+                }};
+                Object.defineProperty(pdfPlugin, "0", {{
+                    value: {{
+                        type: "application/pdf",
+                        suffixes: "pdf",
+                        description: "Portable Document Format",
+                        enabledPlugin: pdfPlugin,
+                    }},
+                }});
+                const pluginArray = Object.create(
+                    typeof PluginArray !== "undefined" ? PluginArray.prototype : Object.prototype
+                );
+                Object.defineProperty(pluginArray, "0", {{ value: pdfPlugin, enumerable: true }});
+                Object.defineProperty(pluginArray, "length", {{ value: 1 }});
+                Object.defineProperty(pluginArray, "item", {{
+                    value: (index) => (index === 0 ? pdfPlugin : null),
+                }});
+                Object.defineProperty(pluginArray, "namedItem", {{
+                    value: (name) => (name === pdfPlugin.name ? pdfPlugin : null),
+                }});
+                defineGetter(navigator, "plugins", pluginArray);
+
+                const mimeType = {{
+                    type: "application/pdf",
+                    suffixes: "pdf",
+                    description: "Portable Document Format",
+                    enabledPlugin: pdfPlugin,
+                }};
+                const mimeArray = Object.create(
+                    typeof MimeTypeArray !== "undefined" ? MimeTypeArray.prototype : Object.prototype
+                );
+                Object.defineProperty(mimeArray, "0", {{ value: mimeType, enumerable: true }});
+                Object.defineProperty(mimeArray, "length", {{ value: 1 }});
+                Object.defineProperty(mimeArray, "item", {{
+                    value: (index) => (index === 0 ? mimeType : null),
+                }});
+                Object.defineProperty(mimeArray, "namedItem", {{
+                    value: (name) => (name === mimeType.type ? mimeType : null),
+                }});
+                defineGetter(navigator, "mimeTypes", mimeArray);
+            }} catch (error) {{}}
+
+            // Extended WebGL parameter map — Pixel-class Adreno/Mali baselines
+            // so Google's fingerprint scripts do not see GPU values that
+            // contradict the spoofed renderer string.
+            try {{
+                const extendedWebglMap = {{
+                    0x0D33: 16384,            // MAX_TEXTURE_SIZE
+                    0x851C: 16384,            // MAX_CUBE_MAP_TEXTURE_SIZE
+                    0x8869: 16,               // MAX_VERTEX_ATTRIBS
+                    0x8DFB: 30,               // MAX_VARYING_VECTORS
+                    0x8DFD: 16,               // MAX_VERTEX_TEXTURE_IMAGE_UNITS
+                    0x8B4D: 1024,             // MAX_VERTEX_UNIFORM_VECTORS
+                    0x8B4C: 1024,             // MAX_FRAGMENT_UNIFORM_VECTORS
+                    0x84E8: 16,               // MAX_RENDERBUFFER_SIZE base
+                }};
+                const patchExtendedParams = (ContextClass) => {{
+                    if (typeof ContextClass === "undefined" || !ContextClass.prototype) {{
+                        return;
+                    }}
+                    const getParam = ContextClass.prototype.getParameter;
+                    ContextClass.prototype.getParameter = function(param) {{
+                        if (param === 0x9245) return {json.dumps(specs["webgl_vendor"])};
+                        if (param === 0x9246) return {json.dumps(specs["webgl_renderer"])};
+                        if (param === 0x1F00) return {json.dumps(specs["webgl_vendor"])};
+                        if (param === 0x1F01) return {json.dumps(specs["webgl_renderer"])};
+                        if (param === 0x1F02) return "WebGL 2.0 (OpenGL ES 3.0 Chromium)";
+                        if (param === 0x8B8C) return "WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.00 Chromium)";
+                        if (param in extendedWebglMap) {{
+                            return extendedWebglMap[param];
+                        }}
+                        return getParam.call(this, param);
+                    }};
+                }};
+                patchExtendedParams(
+                    typeof WebGLRenderingContext === "undefined" ? undefined : WebGLRenderingContext
+                );
+                patchExtendedParams(
+                    typeof WebGL2RenderingContext === "undefined" ? undefined : WebGL2RenderingContext
+                );
+            }} catch (error) {{}}
+
             const batteryManager = {{
                 charging: true,
                 chargingTime: 0,

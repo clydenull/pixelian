@@ -190,11 +190,44 @@ def _detect_driver_major_version(chromedriver_path: str | None) -> Optional[int]
     return None
 
 
+def _resolve_profile_dir(email: str | None) -> str | None:
+    """Return a stable per-account Chrome user-data directory path.
+
+    Returns ``None`` when persistent profiles are disabled or no email was
+    provided, so the caller can fall back to a fresh temp profile.
+
+    The dir name is derived from a SHA-256 of the email so it is stable
+    across runs but does not leak the email in the filesystem (e.g.
+    ``logs/profiles/3a7f8c1d…``).
+    """
+    if not config.BROWSER_PERSISTENT_PROFILE:
+        return None
+    if not email:
+        return None
+
+    import hashlib
+
+    digest = hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()[:16]
+    base_dir = config.BROWSER_PROFILE_DIR
+    profile_path = os.path.join(base_dir, digest)
+    try:
+        os.makedirs(profile_path, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "Could not create persistent profile dir %s (%s); falling back to a fresh temp profile.",
+            profile_path,
+            exc,
+        )
+        return None
+    return profile_path
+
+
 def build_driver(
     profile: DeviceProfile,
     headless: Optional[bool] = None,
     proxy_url: str | None = None,
     proxy_session_token: str | None = None,
+    user_data_dir: str | None = None,
 ) -> webdriver.Chrome:
     """Return a Chrome WebDriver configured for the device profile."""
     runtime_proxy_url = resolve_runtime_proxy_url(proxy_url, proxy_session_token)
@@ -212,6 +245,17 @@ def build_driver(
     options.add_argument("--disable-notifications")
     options.add_argument(f"--window-size={SPECS['width']},{SPECS['height']}")
     options.add_argument(f"--user-agent={profile.user_agent}")
+
+    # Persistent per-account user-data directory keeps cookies, local
+    # storage, and IndexedDB state across runs so Google's risk model
+    # sees a returning device instead of a brand-new zero-cookie session.
+    # This is the single biggest anti-detection improvement for promo
+    # eligibility — fresh profiles consistently get the "no offer"
+    # version of the AI plan landing on flagged risk windows.
+    if user_data_dir:
+        options.add_argument(f"--user-data-dir={user_data_dir}")
+        options.add_argument("--profile-directory=Default")
+        logger.info("Using persistent Chrome profile: %s", user_data_dir)
 
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--disable-features=VizDisplayCompositor")
@@ -988,15 +1032,56 @@ def gmail_login(driver: webdriver.Chrome, email: str, password: str) -> str:
             time.sleep(3.5)
         else:
             # --- MULAI INJEKSI WARM-UP ---
+            # Multi-hop warmup builds a believable Google session footprint
+            # before sign-in, instead of the bot's previous "cold direct
+            # hit on accounts.google.com" pattern. Order is intentional:
+            #   1) news.google.com — drops a benign __Secure-1PSID-shaped
+            #      cookie pre-auth.
+            #   2) www.google.com search — establishes the NID cookie
+            #      Google's risk model checks for "real browser" signal.
+            #   3) one.google.com (anonymous) — pre-warms the AI plans
+            #      surface so the post-login fetch is not the first hit.
+            #
+            # Each hop has a humanish dwell time and a small scroll so it
+            # does not look like rapid scripted navigation.
             logger.info("Melakukan pemanasan profil (warm-up) sebelum login...")
-            try:
-                driver.get("https://news.google.com/")
-                time.sleep(random.uniform(3.0, 5.0))
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight/4);")
-                time.sleep(random.uniform(1.0, 2.0))
-            except TimeoutException as exc:
-                logger.warning("Warm-up page load timed out; continuing anyway: %s", exc)
-                _stop_page_load(driver)
+            warmup_targets: list[tuple[str, float, float]] = [
+                ("https://news.google.com/", 3.0, 5.0),
+            ]
+            if config.BROWSER_DEEP_WARMUP:
+                warmup_targets.extend([
+                    ("https://www.google.com/search?q=pixel+10+pro+review", 2.5, 4.0),
+                    ("https://one.google.com/about/google-ai-plans/", 2.0, 3.5),
+                ])
+
+            for target_url, min_dwell, max_dwell in warmup_targets:
+                try:
+                    driver.get(target_url)
+                    time.sleep(random.uniform(min_dwell, max_dwell))
+                    try:
+                        driver.execute_script(
+                            "window.scrollTo(0, document.body.scrollHeight/"
+                            f"{random.choice([3, 4, 5])});"
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(random.uniform(0.8, 1.6))
+                except TimeoutException as exc:
+                    logger.warning(
+                        "Warm-up page load timed out for %s; continuing anyway: %s",
+                        target_url,
+                        exc,
+                    )
+                    _stop_page_load(driver)
+                except WebDriverException as exc:
+                    # Don't let a warm-up hop break the whole login. If a
+                    # warmup target is blocked by the proxy provider, we
+                    # still want to attempt the actual sign-in.
+                    logger.warning(
+                        "Warm-up navigation failed for %s, continuing: %s",
+                        target_url,
+                        exc,
+                    )
             # --- AKHIR INJEKSI WARM-UP ---
 
         try:
@@ -1770,16 +1855,19 @@ def start_login(
             device.session_id,
         )
         effective_headless = False
+    user_data_dir = _resolve_profile_dir(email)
     logger.info(
-        "Starting WebDriver for session %s (headless=%s)",
+        "Starting WebDriver for session %s (headless=%s, persistent=%s)",
         device.session_id,
         effective_headless,
+        bool(user_data_dir),
     )
     driver = build_driver(
         device,
         headless=effective_headless,
         proxy_url=proxy_url,
         proxy_session_token=proxy_session_token,
+        user_data_dir=user_data_dir,
     )
 
     try:
@@ -1814,6 +1902,7 @@ def start_login(
                 headless=False,
                 proxy_url=proxy_url,
                 proxy_session_token=proxy_session_token,
+                user_data_dir=user_data_dir,
             )
             try:
                 status = gmail_login(retry_driver, email, password)

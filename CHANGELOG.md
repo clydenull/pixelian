@@ -4,6 +4,54 @@ This file documents the feature baseline of AutoPixel.
 
 ## [Unreleased]
 
+### Anti-detection improvements (round 2)
+The single biggest blocker for showing a free-trial CTA to an eligible
+account is Google's risk model flagging the session. The previous build
+gave Google three obvious "this is a bot" signals: zero cookies / zero
+history on every login, a cold direct hit on `accounts.google.com`, and
+a handful of automation tells leaking through despite undetected-
+chromedriver. This round closes all three.
+
+#### Persistent per-account Chrome profile
+- New `BROWSER_PERSISTENT_PROFILE` flag (default **on**) and
+  `BROWSER_PROFILE_DIR` (default `<repo>/logs/profiles/`). Each Google
+  account gets its own SHA-256-hashed user-data directory so cookies,
+  local storage, IndexedDB, and cached fingerprint state survive across
+  `/check_offer` runs.
+- Real Pixel users have history. Without persistence, every login looked
+  like a brand-new factory-reset device with no Google session, which is
+  exactly the risk profile that gets the "no offer" version of the AI
+  plans page. With persistence, the second run onwards looks like a
+  returning device.
+- Profile dirs are gitignored (`profiles/`) so they never accidentally
+  end up in commits.
+
+#### Deeper organic warmup before sign-in
+- New `BROWSER_DEEP_WARMUP` flag (default **on**). Pre-login, the bot
+  now walks Google News → a Google Search query → `one.google.com`
+  anonymously before navigating to `accounts.google.com`, with humanish
+  dwell times and small scrolls between hops. This drops the NID cookie
+  Google's risk model checks and avoids the "cold direct hit" pattern
+  that the previous warmup (single hop to news.google.com) still
+  exhibited.
+
+#### Closed automation tells in `navigator_overrides_js`
+- `navigator.permissions.query({name:"notifications"})` now returns the
+  same `state="default"` real Chrome would, instead of the headless-only
+  `state="denied"` response.
+- `window.chrome` now exposes a populated `runtime` (with stub
+  `connect` / `sendMessage`), `csi`, `loadTimes`, and `app` surface that
+  matches real Chrome. Headless ships with most of those undefined.
+- `navigator.plugins` and `navigator.mimeTypes` now expose a believable
+  Chrome PDF Viewer entry instead of the empty arrays headless returns.
+- WebGL parameter overrides extended beyond vendor/renderer to cover
+  `MAX_TEXTURE_SIZE`, `MAX_CUBE_MAP_TEXTURE_SIZE`, `MAX_VERTEX_ATTRIBS`,
+  `MAX_VARYING_VECTORS`, `MAX_VERTEX_TEXTURE_IMAGE_UNITS`,
+  `MAX_VERTEX_UNIFORM_VECTORS`, `MAX_FRAGMENT_UNIFORM_VECTORS`,
+  `MAX_RENDERBUFFER_SIZE`, `VERSION`, and `SHADING_LANGUAGE_VERSION`,
+  with Pixel-class GPU baselines so they don't contradict the spoofed
+  Adreno/Mali renderer string.
+
 ### Fixed (Google I/O 2026 surface modernization)
 - **Offer scanner aligned with the post Google I/O 2026 Google AI subscription redesign.** The previous scanner only knew about the 2024-2025 layout (`/about/plans` page, `partner-eft-onboard` claim links, and `g1.2tb.ai.*` SKUs), so accounts that landed on the new AI plan landing got "no offer found" even when an eligible trial CTA was on screen.
 - **`config.GOOGLE_ONE_OFFER_URLS`** is now an ordered candidate list instead of two hard-coded URLs. The scanner now walks `one.google.com/offer` (Pixel/promo landing), `one.google.com/about/google-ai-plans/` (modern AI surface), `gemini.google/subscriptions/`, the legacy `/about/plans`, and the `/` dashboard, in that order, and returns as soon as one of them surfaces a valid claim link.

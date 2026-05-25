@@ -447,6 +447,24 @@ PROXY_PRECHECK_TIMEOUT_SECONDS = _env_int("PROXY_PRECHECK_TIMEOUT_SECONDS", 12)
 PROXY_DIAGNOSTICS_VERIFY_SSL = _env_flag("PROXY_DIAGNOSTICS_VERIFY_SSL", "0")
 REGENERATE_DEVICE_ON_RETRY = _env_flag("REGENERATE_DEVICE_ON_RETRY", "1")
 
+# ── Anti-detection / Browser persistence ─────────────────────────────────────
+# When enabled, each Google account gets its own persistent Chrome user-data
+# directory under BROWSER_PROFILE_DIR. This is the single biggest anti-
+# detection win for promo eligibility: Google's risk model treats brand-new
+# zero-cookie sessions as high-risk and frequently hides the trial offer
+# from them. A persistent profile keeps cookies, local storage, and cached
+# fingerprint state so the account looks like a returning device on every
+# /check_offer run.
+BROWSER_PERSISTENT_PROFILE = _env_flag("BROWSER_PERSISTENT_PROFILE", "1")
+BROWSER_PROFILE_DIR = _env_text(
+    "BROWSER_PROFILE_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "profiles"),
+)
+# Visit one or two extra Google surfaces (Search, YouTube) before sign-in so
+# Google's risk model sees an organic browsing session instead of a cold
+# direct hit on accounts.google.com.
+BROWSER_DEEP_WARMUP = _env_flag("BROWSER_DEEP_WARMUP", "1")
+
 # ── Email validation ──────────────────────────────────────────────────────────
 # Leave empty to accept any valid email domain (Gmail + Google Workspace).
 # Populate with specific domains to restrict, e.g. ["gmail.com", "mycompany.com"]
