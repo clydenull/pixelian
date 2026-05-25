@@ -1381,9 +1381,15 @@ def _capture_checkout_after_trial_click(
     driver: webdriver.Chrome,
     button: WebElement,
 ) -> Optional[str]:
-    """Click a Google One trial button and try to capture the checkout URL."""
+    """Click a Google One trial button and try to capture the checkout URL.
+
+    Also walks every open tab/window in case Google opened the checkout in a
+    popup (`target="_blank"`) — the modern "Get Pro" button on
+    ``gemini.google/subscriptions/`` does that on some rollouts.
+    """
     before_url = driver.current_url
     before_handles = list(driver.window_handles)
+    original_handle = driver.current_window_handle
 
     try:
         driver.execute_script(
@@ -1402,6 +1408,21 @@ def _capture_checkout_after_trial_click(
         except Exception as exc:
             logger.warning("Failed to click Google One plan button: %s", exc)
             return None
+
+    def _scan_all_tabs_for_checkout() -> Optional[str]:
+        try:
+            handles = list(driver.window_handles)
+        except Exception:
+            return None
+        for handle in handles:
+            try:
+                driver.switch_to.window(handle)
+                url = driver.current_url or ""
+            except Exception:
+                continue
+            if url and (_looks_like_checkout_url(url) or is_correct_offer_url(url)):
+                return url
+        return None
 
     deadline = time.time() + 15
     while time.time() < deadline:
@@ -1428,6 +1449,11 @@ def _capture_checkout_after_trial_click(
         ):
             return current_url
 
+        # Walk every open tab in case the checkout opened in a popup.
+        popup_url = _scan_all_tabs_for_checkout()
+        if popup_url:
+            return popup_url
+
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             for frame in iframes:
@@ -1438,6 +1464,12 @@ def _capture_checkout_after_trial_click(
             pass
 
         time.sleep(0.5)
+
+    # Final sweep — restore focus to the original tab if nothing matched.
+    try:
+        driver.switch_to.window(original_handle)
+    except Exception:
+        pass
 
     return None
 
